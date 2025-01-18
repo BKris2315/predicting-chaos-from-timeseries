@@ -169,8 +169,7 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
-<<<<<<< HEAD
 
-outputs/
-=======
->>>>>>> fd31f40 (Initial commit)
+*copy*
+
+
