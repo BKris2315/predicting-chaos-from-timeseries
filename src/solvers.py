@@ -4,16 +4,16 @@ from typing import List, Tuple, Union, Dict
 from scipy.integrate import odeint, solve_ivp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from src.models import lorenz_system, lorenz_system_ivp
+from src.models import Models as mod 
 
 # Move this outside to make it picklable
 def solve_for_r(r, t_span, dt, initial_state, if_ode, method):
     t = np.arange(t_span[0], t_span[1], dt)
     if if_ode:
-        sol = odeint(lorenz_system, initial_state, t, args=(r,))
+        sol = odeint(mod.lorenz_system, initial_state, t, args=(r,))
     else:
         sol = solve_ivp(
-            lorenz_system,
+            mod.lorenz_system_ivp,
             t_span,
             np.array(initial_state),
             args=(r,),
@@ -38,11 +38,11 @@ def solve_lorenz(
         # Sequential processing if initial states depend on previous results
         for r in tqdm(r_values):
             if if_ode:
-                sol = odeint(lorenz_system, initial_state, t, args=(r,))
+                sol = odeint(mod.lorenz_system, initial_state, t, args=(r,))
                 initial_state = sol[-1]
             else:
                 sol = solve_ivp(
-                    lorenz_system,
+                    mod.lorenz_system_ivp,
                     t_span,
                     np.array(initial_state),
                     args=(r,),

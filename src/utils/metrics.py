@@ -1,8 +1,16 @@
 import numpy as np
 import numba as nb
+from tqdm import tqdm
 from typing import Optional
+from scipy.integrate import odeint
+from scipy.optimize import curve_fit
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 
 class Metrics:
+    def __init__(self)->None:
+        pass
+
     @staticmethod
     def cross_correlation_3d_jit(x1, x2):
         """
@@ -111,3 +119,195 @@ class Metrics:
             vals_list.extend(vals[cross_indices])
 
         return control_param_list, vals_list
+    
+    @staticmethod
+    def compute_distances_and_correlations(dynamics, 
+                                       initial_conditions: np.ndarray, 
+                                       delta_range: np.ndarray, 
+                                       T: float, 
+                                       d_tol: float, 
+                                       lambda_max: float, 
+                                       dt: float = 0.01,
+                                       T_multiplier: float = 10):
+        """
+        Compute mean distances and cross-correlation for each delta in delta_range.
+        
+        Parameters:
+            dynamics (callable): Function defining the system's dynamics `dx/dt = f(x, t)`.
+            initial_conditions (ndarray): Array of sampled points from the system's trajectory.
+            delta_range (ndarray): Array of perturbation distances.
+            T (float): Maximum integration time for perturbations.
+            d_tol (float): Distance tolerance used for scaling time.
+            lambda_max (float): Largest Lyapunov exponent for the system.
+            dt (float): Integration time step.
+            T_multiplier (float): Multiplier for T to control the size of the perturbations.
+        
+        Returns:
+            distances (list): Mean distances for each delta.
+            correlations (list): Cross-correlations for each delta.
+        """
+        distances = []
+        correlations = []
+
+        # Calculate the variance of the sampled trajectory
+        mu = np.mean(initial_conditions, axis=0)
+        s2 = np.mean(np.linalg.norm(initial_conditions - mu, axis=1)**2)
+        # s2 = np.mean([np.linalg.norm(x - mu)**2 for x in initial_conditions])
+        # mu = np.mean(initial_conditions)
+        # s2 = np.mean((initial_conditions - mu)**2)
+
+        for delta in tqdm(delta_range, desc="Processing delta values"):
+            T_lyap = np.log(d_tol / delta) / lambda_max  # Lyapunov prediction time
+            evaluation_time = min(T, max(T_multiplier * T_lyap, 200))
+
+            mean_distance = 0
+            mean_square_distance = 0
+
+            for u in initial_conditions:
+                # Perturb the initial condition
+                n = np.random.normal(size=u.shape)
+                n /= np.linalg.norm(n)  # Normalize to unit vector
+                perturbed_u = u + delta * n
+
+                # Integrate both trajectories
+                t_span = np.arange(0, evaluation_time, dt)
+                reference_trajectory = odeint(dynamics, u, t_span)
+                perturbed_trajectory = odeint(dynamics, perturbed_u, t_span)
+
+                # Calculate the distance and accumulate
+                final_reference = reference_trajectory[-1]
+                final_perturbed = perturbed_trajectory[-1]
+                distance = np.linalg.norm(final_reference - final_perturbed)
+                mean_distance += distance
+                mean_square_distance += distance**2
+
+            # Calculate mean distance and correlation
+            mean_distance /= len(initial_conditions)
+            mean_square_distance /= len(initial_conditions)
+            correlation = 1 - mean_square_distance / (2 * s2)
+
+            distances.append(mean_distance)
+            correlations.append(correlation)
+
+        return distances, correlations
+    @staticmethod
+    def compute_distance(dynamics, u, delta, evaluation_time, dt, r):
+        # Perturb the initial condition
+        n = np.random.normal(size=u.shape)
+        n /= np.linalg.norm(n)  # Normalize to unit vector
+        perturbed_u = u + delta * n
+
+        # Integrate both trajectories
+        t_span = np.arange(0, evaluation_time, dt)
+        reference_trajectory = odeint(dynamics, u, t_span, args=(r,))
+        perturbed_trajectory = odeint(dynamics, perturbed_u, t_span, args=(r,))
+
+        # Calculate the distance
+        final_reference = reference_trajectory[-1]
+        final_perturbed = perturbed_trajectory[-1]
+        distance = np.linalg.norm(final_reference - final_perturbed)
+        return distance, distance**2
+
+    def compute_distances_and_correlations_paral(self, dynamics, 
+                                                initial_conditions: np.ndarray, 
+                                                delta_range: np.ndarray, 
+                                                T: float, 
+                                                d_tol: float, 
+                                                lambda_max: float, 
+                                                r: float, 
+                                                dt: float = 0.01,
+                                                T_multiplier: float = 10):
+        """
+        Compute mean distances and cross-correlation for each delta in delta_range.
+        
+        Parameters:
+            dynamics (callable): Function defining the system's dynamics `dx/dt = f(x, t)`.
+            initial_conditions (ndarray): Array of sampled points from the system's trajectory.
+            delta_range (ndarray): Array of perturbation distances.
+            T (float): Maximum integration time for perturbations.
+            d_tol (float): Distance tolerance used for scaling time.
+            lambda_max (float): Largest Lyapunov exponent for the system.
+            r (float): Control parameter value.
+            dt (float): Integration time step.
+            T_multiplier (float): Multiplier for T to control the size of the perturbations.
+        
+        Returns:
+            distances (list): Mean distances for each delta.
+            correlations (list): Cross-correlations for each delta.
+        """
+
+        if lambda_max < 0:
+            print("REG 1.0 1.0")  # Regular
+            return
+
+        distances = []
+        correlations = []
+
+        # Calculate the variance of the sampled trajectory
+        mu = np.mean(initial_conditions, axis=0)
+        s2 = np.mean(np.linalg.norm(initial_conditions - mu, axis=1)**2)
+        # s2 = np.mean([np.linalg.norm(x - mu)**2 for x in initial_conditions])
+        # mu = np.mean(initial_conditions)
+        # s2 = np.mean((initial_conditions - mu)**2)
+
+        for delta in tqdm(delta_range, desc="Processing delta values"):
+            T_lyap = np.log(d_tol / delta) / lambda_max  # Lyapunov prediction time
+            evaluation_time = min(T, max(T_multiplier * T_lyap, 200))
+            mean_distance = 0
+            mean_square_distance = 0
+
+            with ProcessPoolExecutor() as executor:
+                futures = [
+                    executor.submit(self.compute_distance, dynamics, u, delta, evaluation_time, dt, r)
+                    for u in initial_conditions
+                ]
+                for future in as_completed(futures):
+                    try:
+                        distance, square_distance = future.result()
+                        mean_distance += distance
+                        mean_square_distance += square_distance
+                    except Exception as e:
+                        print(f"Error computing distance: {e}")
+
+            # Calculate mean distance and correlation
+            mean_distance /= len(initial_conditions)
+            mean_square_distance /= len(initial_conditions)
+            correlation = 1 - mean_square_distance / (2 * s2)
+
+            distances.append(mean_distance)
+            correlations.append(correlation)
+
+        return distances, correlations
+    
+    @staticmethod
+    def log_log_model(delta, nu, const, shift):
+        """
+        Log-log model function for cross-distance correlation
+
+        Parameters:
+            delta (float): Perturbation distance.
+            nu (float): Scaling exponent.
+            const (float): Constant term.
+            c (float): Shift term.
+
+        Returns:
+            float: Log-log model function value.
+        """
+        return const*delta**nu + shift
+
+    
+    def compute_distance_slope(self, delta_range, distances):
+        """
+        Compute the slope of distances in log-log space.
+
+        Parameters:
+            delta_range (ndarray): Array of perturbation distances.
+            distances (list): Mean distances corresponding to each delta.
+
+        Returns:
+            slope (float): Scaling coefficient (nu).
+        """
+        popt, _ = curve_fit(self.log_log_model, delta_range, distances, p0=[0.001,5, 1], bounds=([0,0,0],[1, np.inf, np.inf]))
+        slope, const, shift = popt
+
+        return slope
